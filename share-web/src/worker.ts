@@ -64,12 +64,14 @@ function parseId(id: string): { id: string; expiry: ExpiryClass; random: string;
 async function put(request: Request, env: Env, publication: NonNullable<ReturnType<typeof parseId>>): Promise<Response> {
   if (env.CREATE_ENABLED === "false") return json({ error: "creation_disabled" }, 503);
   if (await limited(env.CREATE_LIMITER, clientIp(request))) return json({ error: "rate_limited" }, 429);
-  const declaredLength = Number(request.headers.get("content-length") ?? "0");
-  if (declaredLength > MAX_ENVELOPE_BYTES) return json({ error: "payload_too_large" }, 413);
+  const declaredLength = Number(request.headers.get("content-length") ?? "NaN");
+  if (Number.isFinite(declaredLength) && (declaredLength <= 0 || declaredLength > MAX_ENVELOPE_BYTES)) {
+    return json({ error: "payload_too_large" }, 413);
+  }
   const token = request.headers.get("x-sivtr-management-token");
   if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return json({ error: "not_found" }, 404);
-  const body = new Uint8Array(await request.arrayBuffer());
-  if (body.byteLength === 0 || body.byteLength > MAX_ENVELOPE_BYTES) return json({ error: "payload_too_large" }, 413);
+  const body = await readCappedBody(request.body, MAX_ENVELOPE_BYTES);
+  if (!body) return json({ error: "payload_too_large" }, 413);
   if (!validEnvelope(body)) return json({ error: "invalid_envelope" }, 400);
   const createdAt = new Date();
   const expiresAt = new Date(createdAt.getTime() + expiryMs(publication.expiry));
@@ -116,6 +118,32 @@ async function remove(request: Request, env: Env, publication: NonNullable<Retur
   if (!expected || !timingSafeEqual(expected, actual)) return json({ error: "not_found" }, 404);
   await env.PUBLICATIONS.delete(publication.key);
   return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+}
+
+async function readCappedBody(stream: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<Uint8Array | null> {
+  if (!stream) return null;
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  if (total === 0) return null;
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 function validEnvelope(body: Uint8Array): boolean {
@@ -179,4 +207,4 @@ function logEvent(kind: string, request: Request, status: number, latencyMs: num
   console.log(JSON.stringify({ kind, method: request.method, route: new URL(request.url).pathname.split("/").slice(0, 4).join("/"), status, latency_ms: latencyMs, size: size ? Number(size) : undefined, error }));
 }
 
-export { expiryMs, isExpired, parseId, validEnvelope };
+export { expiryMs, isExpired, parseId, readCappedBody, validEnvelope };

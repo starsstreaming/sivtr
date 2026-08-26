@@ -108,6 +108,8 @@ pub struct PublicConversationAtom {
     pub parts: Vec<PublicConversationPart>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gap_before: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gap_after: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +117,8 @@ pub struct PublicConversationPart {
     pub kind: PublicPartKind,
     pub text: String,
     pub occurred_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gap_before: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -531,6 +535,7 @@ fn create_granular_publication_draft(
 
             let mut public_parts = Vec::new();
             let atom_index = items.len() + 1;
+            let mut previous_seq = None;
             for seq in &atom.part_seqs {
                 let part = record
                     .part_for_at(crate::record::WorkAt::Part(*seq))
@@ -549,6 +554,8 @@ fn create_granular_publication_draft(
                     entry.item_indices.push(atom_index);
                 }
                 if !text.trim().is_empty() {
+                    let part_gap_before = previous_seq
+                        .is_some_and(|start| omitted_between(record, start, *seq, &selected));
                     public_parts.push(PublicConversationPart {
                         kind: public_part_kind(part.kind()),
                         text,
@@ -556,9 +563,11 @@ fn create_granular_publication_draft(
                             .occurred_at
                             .clone()
                             .or_else(|| record.time.primary_at().map(str::to_string)),
+                        gap_before: part_gap_before,
                     });
                 }
                 source_refs.push(record.work_ref.with_part(*seq).to_string());
+                previous_seq = Some(*seq);
             }
             if public_parts.is_empty() {
                 continue;
@@ -589,6 +598,7 @@ fn create_granular_publication_draft(
                 label,
                 parts: public_parts,
                 gap_before,
+                gap_after: false,
             });
             previous = Some((
                 record.work_ref.index(),
@@ -602,6 +612,14 @@ fn create_granular_publication_draft(
         !items.is_empty(),
         "publication must contain visible selected content"
     );
+    if let Some((_, record_index, last_seq, selected)) = previous.as_ref() {
+        let record = &records[*record_index];
+        if omitted_after(record, *last_seq, selected) {
+            if let Some(item) = items.last_mut() {
+                item.gap_after = true;
+            }
+        }
+    }
 
     let now = policy.published_at.unwrap_or_else(Utc::now);
     let expires_at = now + policy.expires.duration();
@@ -655,6 +673,29 @@ fn create_granular_publication_draft(
         source_provider: provider.command_name().to_string(),
         source_refs,
     })
+}
+
+fn omitted_between(
+    record: &WorkRecord,
+    start: usize,
+    end: usize,
+    selected: &std::collections::BTreeSet<usize>,
+) -> bool {
+    record
+        .parts
+        .iter()
+        .any(|part| part.seq > start && part.seq < end && !selected.contains(&part.seq))
+}
+
+fn omitted_after(
+    record: &WorkRecord,
+    last_seq: usize,
+    selected: &std::collections::BTreeSet<usize>,
+) -> bool {
+    record
+        .parts
+        .iter()
+        .any(|part| part.seq > last_seq && !selected.contains(&part.seq))
 }
 
 fn record_for_whole_anchor<'a>(
@@ -1010,6 +1051,73 @@ mod tests {
         assert_eq!(full_skip_snapshot.items, slim_skip_snapshot.items);
         assert!(slim_skip_snapshot.items[1].gap_before);
         assert_eq!(full_skip.content_sha256, slim_skip.content_sha256);
+    }
+
+    #[test]
+    fn granular_snapshot_marks_gaps_inside_interleaved_tool_atoms() {
+        let mut record = granular_record(1);
+        record.parts = vec![
+            WorkPart {
+                seq: 1,
+                occurred_at: None,
+                data: WorkPartData::User {
+                    content: "run both".into(),
+                },
+            },
+            WorkPart {
+                seq: 2,
+                occurred_at: None,
+                data: WorkPartData::ToolCall {
+                    call_id: Some("a".into()),
+                    tool: Some("shell".into()),
+                    input: serde_json::json!({"command": "echo a"}),
+                },
+            },
+            WorkPart {
+                seq: 3,
+                occurred_at: None,
+                data: WorkPartData::ToolCall {
+                    call_id: Some("b".into()),
+                    tool: Some("shell".into()),
+                    input: serde_json::json!({"command": "echo b"}),
+                },
+            },
+            WorkPart {
+                seq: 4,
+                occurred_at: None,
+                data: WorkPartData::ToolResult {
+                    call_id: Some("a".into()),
+                    tool: Some("shell".into()),
+                    output: serde_json::json!({"stdout": "a"}),
+                    start_line: None,
+                },
+            },
+            WorkPart {
+                seq: 5,
+                occurred_at: None,
+                data: WorkPartData::ToolResult {
+                    call_id: Some("b".into()),
+                    tool: Some("shell".into()),
+                    output: serde_json::json!({"stdout": "b"}),
+                    start_line: None,
+                },
+            },
+        ];
+        let anchors = [record.work_ref.with_part(2), record.work_ref.with_part(4)];
+        let draft = create_publication_draft(
+            std::slice::from_ref(&record),
+            &anchors,
+            &PublicationPolicy::default(),
+        )
+        .unwrap();
+        let PublicConversationSnapshot::V2(snapshot) = &draft.snapshot else {
+            panic!("part anchors use the v2 snapshot")
+        };
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].parts.len(), 2);
+        assert!(snapshot.items[0].gap_before);
+        assert!(snapshot.items[0].parts[1].gap_before);
+        assert!(snapshot.items[0].gap_after);
     }
 
     #[test]

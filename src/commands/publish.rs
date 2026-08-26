@@ -22,6 +22,7 @@ use sivtr_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
@@ -34,6 +35,7 @@ use crate::output;
 use crate::tui::workspace::{WorkspaceFocus, WorkspaceSession, WorkspaceSource};
 
 const ENVELOPE_LIMIT: usize = 5 * 1024 * 1024;
+const SNAPSHOT_PLAINTEXT_LIMIT: usize = 16 * 1024 * 1024;
 const ENVELOPE_MAGIC: &[u8; 8] = b"SIVTPUB1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,9 +299,17 @@ fn print_snapshot_items(snapshot: &PublicConversationSnapshot) {
                     .unwrap_or_default();
                 println!("[{:?}{}]", item.kind, label);
                 for part in &item.parts {
+                    if part.gap_before {
+                        println!("[部分内容未分享]");
+                        println!();
+                    }
                     println!("{}", part.text);
                 }
                 println!();
+                if item.gap_after {
+                    println!("[部分内容未分享]");
+                    println!();
+                }
             }
         }
     }
@@ -562,9 +572,19 @@ fn random_token(length: usize) -> Result<String> {
 }
 
 fn compress_snapshot(draft: &PublicationDraft) -> Result<Vec<u8>> {
+    ensure_snapshot_plaintext_limit(draft.canonical_json.len())?;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(draft.canonical_json.as_bytes())?;
     Ok(encoder.finish()?)
+}
+
+fn ensure_snapshot_plaintext_limit(len: usize) -> Result<()> {
+    if len > SNAPSHOT_PLAINTEXT_LIMIT {
+        bail!(
+            "publication snapshot is {len} bytes uncompressed; maximum is 16 MiB; narrow the WorkSet"
+        );
+    }
+    Ok(())
 }
 
 fn encrypt_snapshot(draft: &PublicationDraft, id: &str, viewer_key: &str) -> Result<Vec<u8>> {
@@ -668,7 +688,10 @@ impl PublicationDb {
     fn open() -> Result<Self> {
         let dir = workspace::data_dir();
         std::fs::create_dir_all(&dir)?;
-        let connection = Connection::open(dir.join("publication-state.db"))?;
+        restrict_directory(&dir)?;
+        let path = dir.join("publication-state.db");
+        let connection = Connection::open(&path)?;
+        restrict_file(&path)?;
         Self::from_connection(connection)
     }
 
@@ -771,6 +794,30 @@ fn is_expired_at(value: &str, now: DateTime<Utc>) -> bool {
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc) <= now)
         .unwrap_or(true)
+}
+
+#[cfg(unix)]
+fn restrict_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn row_from_query(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublicationRow> {
@@ -890,6 +937,12 @@ mod tests {
     }
 
     #[test]
+    fn uncompressed_snapshot_over_16mib_is_rejected() {
+        assert!(ensure_snapshot_plaintext_limit(SNAPSHOT_PLAINTEXT_LIMIT).is_ok());
+        assert!(ensure_snapshot_plaintext_limit(SNAPSHOT_PLAINTEXT_LIMIT + 1).is_err());
+    }
+
+    #[test]
     fn warnings_always_require_explicit_allow() {
         assert!(require_allow_warnings(true, false).is_err());
         assert!(require_allow_warnings(true, true).is_ok());
@@ -1001,7 +1054,8 @@ mod tests {
 
         let other = chat_turn("other", 1, "x", "y");
         assert!(
-            expand_picker_anchors(std::slice::from_ref(&record), &[other.work_ref.whole()]).is_err()
+            expand_picker_anchors(std::slice::from_ref(&record), &[other.work_ref.whole()])
+                .is_err()
         );
     }
 

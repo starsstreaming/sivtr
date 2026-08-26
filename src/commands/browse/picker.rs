@@ -2545,6 +2545,10 @@ mod tests {
         // Displayed text is Reading-mode render of parts; filter applies to that text.
         assert!(displayed.units[0].plain.lines().count() >= 1);
         assert_eq!(input.units[0].plain, "ask 1\nask 3");
+        assert!(
+            displayed.anchors.is_empty() && input.anchors.is_empty(),
+            "line-filtered copies must not publish whole atoms"
+        );
     }
 
     #[test]
