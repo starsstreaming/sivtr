@@ -879,6 +879,7 @@ pub(crate) fn run(
                             &selected_dialogues,
                             dialogue_idx,
                             &content_pane,
+                            line_filter_spec(&line_filter),
                         ) {
                             return Ok(picked);
                         }
@@ -1629,13 +1630,15 @@ mod tests {
 
         // Nothing marked: the copy path yields None.
         assert!(
-            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane).is_none()
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .is_none()
         );
 
         // Mark the tool block (output half): copy joins the call + result bodies.
         pane.toggle_mark(ContentIoFocus::Output, 0, 0);
-        let picked = workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane)
-            .expect("marked copy");
+        let picked =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .expect("marked copy");
         assert_eq!(picked.units.len(), 1);
         let text = &picked.units[0].plain;
         assert!(text.contains("$ ls"), "tool call body missing: {text}");
@@ -1654,8 +1657,9 @@ mod tests {
 
         // Mark the user block (input half): both marked blocks are joined.
         pane.toggle_mark(ContentIoFocus::Input, 0, 0);
-        let picked = workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane)
-            .expect("marked copy");
+        let picked =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .expect("marked copy");
         let text = &picked.units[0].plain;
         assert!(text.contains("user text"));
         assert!(text.contains("$ ls"));
@@ -1722,8 +1726,9 @@ mod tests {
         // reply is id 0 in the output half). Copy joins the run's tool
         // bodies, never the user or assistant blocks.
         pane.toggle_mark(ContentIoFocus::Output, 0, 1);
-        let picked = workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane)
-            .expect("marked copy");
+        let picked =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .expect("marked copy");
         let text = &picked.units[0].plain;
         assert!(text.contains("cmd 0") && text.contains("cmd 2"), "{text}");
         assert!(
@@ -1808,8 +1813,9 @@ mod tests {
         let hit_id = hit_id.expect("a block is hit in the output half");
         pane.toggle_mark(ContentIoFocus::Output, 0, hit_id);
 
-        let picked = workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane)
-            .expect("marked copy must not be None after a real dot hit");
+        let picked =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .expect("marked copy must not be None after a real dot hit");
         let text = &picked.units[0].plain;
         assert!(text.contains("cmd 0") && text.contains("cmd 2"), "{text}");
         assert!(
@@ -1876,6 +1882,7 @@ mod tests {
             0,
             ContentIoFocus::Output,
             1,
+            None,
         )
         .expect("tool block copy must not be None");
         let text = &picked.units[0].plain;
@@ -1936,6 +1943,7 @@ mod tests {
             0,
             ContentIoFocus::Output,
             1,
+            None,
         )
         .expect("run member copy must not be None");
         let text = &picked.units[0].plain;
@@ -1957,8 +1965,9 @@ mod tests {
             expanded: &expanded,
         });
         pane.toggle_mark(ContentIoFocus::Output, 0, 1);
-        let picked = workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane)
-            .expect("marked member copy");
+        let picked =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .expect("marked member copy");
         let text = &picked.units[0].plain;
         assert!(text.contains("pat 0"), "first member missing: {text}");
         assert!(!text.contains("pat 1"), "second member leaked: {text}");
@@ -2007,6 +2016,7 @@ mod tests {
             0,
             ContentIoFocus::Output,
             0,
+            None,
         )
         .expect("cursor block copy");
         assert_eq!(picked.units.len(), 1);
@@ -2028,6 +2038,7 @@ mod tests {
             0,
             ContentIoFocus::Input,
             0,
+            None,
         )
         .expect("cursor block copy");
         assert_eq!(picked.units[0].plain, "user text");

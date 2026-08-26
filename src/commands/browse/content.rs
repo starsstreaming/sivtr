@@ -185,6 +185,7 @@ pub(super) fn workspace_picked_content_for_marked_blocks(
     selected_dialogues: &[bool],
     dialogue_idx: usize,
     content_pane: &ContentPane,
+    line_filter: Option<&str>,
 ) -> Option<WorkspacePickedContent> {
     let picked_indices = picked_dialogue_indices(selected_dialogues, dialogue_idx);
     let mut texts = Vec::new();
@@ -213,7 +214,14 @@ pub(super) fn workspace_picked_content_for_marked_blocks(
             }
         }
     }
-    picked_for_texts(dialogues, selected_dialogues, dialogue_idx, texts, anchors)
+    picked_for_texts(
+        dialogues,
+        selected_dialogues,
+        dialogue_idx,
+        texts,
+        anchors,
+        line_filter,
+    )
 }
 
 /// Push every marked block's body, descending into run members (a marked
@@ -263,6 +271,7 @@ pub(super) fn workspace_picked_content_for_cursor_block(
     dialogue_idx: usize,
     half: ContentIoFocus,
     block_id: usize,
+    line_filter: Option<&str>,
 ) -> Option<WorkspacePickedContent> {
     let dialogue = dialogues.get(dialogue_idx)?;
     let record = dialogue.record.as_ref()?;
@@ -281,6 +290,7 @@ pub(super) fn workspace_picked_content_for_cursor_block(
             .iter()
             .map(|index| record.work_ref.with_part(record.parts[*index].seq))
             .collect(),
+        line_filter,
     )
 }
 
@@ -303,6 +313,7 @@ fn picked_for_texts(
     dialogue_idx: usize,
     texts: Vec<String>,
     anchors: Vec<WorkRef>,
+    line_filter: Option<&str>,
 ) -> Option<WorkspacePickedContent> {
     if texts.is_empty() {
         return None;
@@ -316,7 +327,11 @@ fn picked_for_texts(
             plain,
         }],
         selection: CommandSelection::RecentExplicit(vec![1]),
-        anchors,
+        anchors: if line_filter.is_some() {
+            Vec::new()
+        } else {
+            anchors
+        },
     })
 }
 
@@ -536,8 +551,9 @@ mod tests {
             pane.toggle_mark(ContentIoFocus::Output, idx, 0);
         }
 
-        let picked = workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane)
-            .expect("marked blocks across two dialogues");
+        let picked =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .expect("marked blocks across two dialogues");
         let joined: Vec<String> = picked.units.iter().map(|unit| unit.plain.clone()).collect();
         let all = joined.join("\n");
         assert!(
@@ -706,9 +722,14 @@ mod tests {
         });
         pane.toggle_mark(ContentIoFocus::Input, 0, 0);
 
-        let marked = workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane)
-            .expect("marked user block");
+        let marked =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, None)
+                .expect("marked user block");
         assert_eq!(part_seqs(&marked), vec![1]);
+        let filtered =
+            workspace_picked_content_for_marked_blocks(&dialogues, &selected, 0, &pane, Some("1"))
+                .expect("filtered marked copy still has text");
+        assert!(filtered.anchors.is_empty());
 
         let cursor = workspace_picked_content_for_cursor_block(
             &dialogues,
@@ -716,6 +737,7 @@ mod tests {
             0,
             ContentIoFocus::Output,
             0,
+            None,
         )
         .expect("cursor output block");
         assert!(cursor.anchors.iter().all(|anchor| anchor.part().is_some()));

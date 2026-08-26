@@ -11,9 +11,10 @@ use crate::record::{work_atoms, WorkPartKind, WorkRecord, WorkRecordKind, WorkRe
 pub const PUBLICATION_SCHEMA_VERSION: u32 = 1;
 pub const GRANULAR_PUBLICATION_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PublicationExpiry {
     OneDay,
+    #[default]
     SevenDays,
     ThirtyDays,
     NinetyDays,
@@ -49,28 +50,12 @@ impl PublicationExpiry {
     }
 }
 
-impl Default for PublicationExpiry {
-    fn default() -> Self {
-        Self::SevenDays
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PublicationPolicy {
     pub title: Option<String>,
     pub expires: PublicationExpiry,
     /// Injectable for deterministic tests; production callers leave this None.
     pub published_at: Option<DateTime<Utc>>,
-}
-
-impl Default for PublicationPolicy {
-    fn default() -> Self {
-        Self {
-            title: None,
-            expires: PublicationExpiry::default(),
-            published_at: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,6 +483,11 @@ fn create_granular_publication_draft(
                 atom.part_seqs.iter().all(|seq| selected.contains(seq)),
                 "publication selection must include complete tool atoms"
             );
+            ensure!(
+                tool_atom_is_closed(&atom, record),
+                "publication cannot include a tool call without its result"
+            );
+            let atom_kind = public_atom_kind(atom.kind)?;
 
             let first_seq = *atom.part_seqs.first().expect("atom has a part");
             let last_seq = *atom.part_seqs.last().expect("atom has a part");
@@ -562,7 +552,7 @@ fn create_granular_publication_draft(
                     let part_gap_before = previous_seq
                         .is_some_and(|start| omitted_between(record, start, *seq, &selected));
                     public_parts.push(PublicConversationPart {
-                        kind: public_part_kind(part.kind()),
+                        kind: public_part_kind(part.kind())?,
                         text,
                         occurred_at: part
                             .occurred_at
@@ -599,7 +589,7 @@ fn create_granular_publication_draft(
                 None
             };
             items.push(PublicConversationAtom {
-                kind: public_atom_kind(atom.kind)?,
+                kind: atom_kind,
                 label,
                 parts: public_parts,
                 gap_before,
@@ -632,7 +622,7 @@ fn create_granular_publication_draft(
         .title
         .clone()
         .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| first_record.title.clone());
+        .unwrap_or_else(|| title_from_public_items(&items));
     let (title, title_report) = privacy::redact_text_with_report(&title_raw);
     redaction_count += title_report.redactions;
     for kind in title_report.warnings {
@@ -765,16 +755,62 @@ fn public_atom_kind(kind: WorkPartKind) -> Result<PublicAtomKind> {
     }
 }
 
-fn public_part_kind(kind: WorkPartKind) -> PublicPartKind {
+fn public_part_kind(kind: WorkPartKind) -> Result<PublicPartKind> {
     match kind {
-        WorkPartKind::User => PublicPartKind::User,
-        WorkPartKind::Assistant => PublicPartKind::Assistant,
-        WorkPartKind::ToolCall => PublicPartKind::ToolCall,
-        WorkPartKind::ToolResult => PublicPartKind::ToolResult,
-        WorkPartKind::Skill => PublicPartKind::Skill,
-        WorkPartKind::Thinking => PublicPartKind::Thinking,
-        _ => unreachable!("unsupported granular publication part kind"),
+        WorkPartKind::User => Ok(PublicPartKind::User),
+        WorkPartKind::Assistant => Ok(PublicPartKind::Assistant),
+        WorkPartKind::ToolCall => Ok(PublicPartKind::ToolCall),
+        WorkPartKind::ToolResult => Ok(PublicPartKind::ToolResult),
+        WorkPartKind::Skill => Ok(PublicPartKind::Skill),
+        WorkPartKind::Thinking => Ok(PublicPartKind::Thinking),
+        _ => bail!("unsupported granular publication part kind `{kind:?}`"),
     }
+}
+
+fn tool_atom_is_closed(atom: &crate::record::WorkAtom, record: &WorkRecord) -> bool {
+    if atom.kind != WorkPartKind::ToolCall && atom.kind != WorkPartKind::ToolResult {
+        return true;
+    }
+    let mut has_call = false;
+    let mut has_result = false;
+    for seq in &atom.part_seqs {
+        match record
+            .part_for_at(crate::record::WorkAt::Part(*seq))
+            .map(|part| part.kind())
+        {
+            Some(WorkPartKind::ToolCall) => has_call = true,
+            Some(WorkPartKind::ToolResult) => has_result = true,
+            _ => {}
+        }
+    }
+    has_call && has_result
+}
+
+fn title_from_public_items(items: &[PublicConversationAtom]) -> String {
+    let preferred = [
+        PublicAtomKind::User,
+        PublicAtomKind::Assistant,
+        PublicAtomKind::Skill,
+        PublicAtomKind::Tool,
+        PublicAtomKind::Thinking,
+    ];
+    for kind in preferred {
+        if let Some(text) = items
+            .iter()
+            .filter(|item| item.kind == kind)
+            .flat_map(|item| item.parts.iter())
+            .map(|part| part.text.trim())
+            .find(|text| !text.is_empty())
+        {
+            let line = text.lines().next().unwrap_or(text).trim();
+            let mut title = line.chars().take(80).collect::<String>();
+            if line.chars().count() > 80 {
+                title.push('…');
+            }
+            return title;
+        }
+    }
+    "Sivtr conversation".to_string()
 }
 
 /// Hash only the stable public content. Publication timestamps belong to the
@@ -1123,6 +1159,68 @@ mod tests {
         assert!(snapshot.items[0].gap_before);
         assert!(snapshot.items[0].parts[1].gap_before);
         assert!(snapshot.items[0].gap_after);
+    }
+
+    #[test]
+    fn granular_snapshot_rejects_unclosed_tool_calls() {
+        let mut record = granular_record(1);
+        record.parts = vec![WorkPart {
+            seq: 1,
+            occurred_at: None,
+            data: WorkPartData::ToolCall {
+                call_id: Some("a".into()),
+                tool: Some("shell".into()),
+                input: serde_json::json!({"command": "ls"}),
+            },
+        }];
+        let anchors = [record.work_ref.with_part(1)];
+        assert!(create_publication_draft(
+            std::slice::from_ref(&record),
+            &anchors,
+            &PublicationPolicy::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn granular_snapshot_title_comes_from_selected_public_parts() {
+        let mut record = granular_record(1);
+        record.title = "secret user prompt".into();
+        let anchors = [record.work_ref.with_part(5)];
+        let draft = create_publication_draft(
+            std::slice::from_ref(&record),
+            &anchors,
+            &PublicationPolicy::default(),
+        )
+        .unwrap();
+        let PublicConversationSnapshot::V2(snapshot) = &draft.snapshot else {
+            panic!("part anchors use the v2 snapshot")
+        };
+        assert_eq!(snapshot.title, "reply");
+        assert!(!snapshot.title.contains("secret"));
+    }
+
+    #[test]
+    fn granular_snapshot_rejects_unsupported_part_kinds() {
+        let mut record = granular_record(1);
+        record.parts = vec![WorkPart {
+            seq: 1,
+            occurred_at: None,
+            data: WorkPartData::Command {
+                content: "cargo test".into(),
+            },
+        }];
+        let anchors = [record.work_ref.with_part(1)];
+        let error = create_publication_draft(
+            std::slice::from_ref(&record),
+            &anchors,
+            &PublicationPolicy::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
