@@ -346,12 +346,10 @@ fn create(args: PublishCreateArgs) -> Result<()> {
             bail!("publication cancelled");
         }
     }
-    if has_warnings && !args.allow_warnings && !interactive {
-        bail!("non-interactive publish with warnings requires --allow-warnings");
-    }
+    require_allow_warnings(has_warnings, args.allow_warnings)?;
 
     let config = SivtrConfig::load()?;
-    let endpoint = config.publish.endpoint.trim_end_matches('/').to_string();
+    let endpoint = resolve_endpoint(&config)?;
     let expiry = PublicationExpiry::parse(&args.expires)?;
     let id = format!("{}_{}", expiry.as_str(), random_token(16)?);
     let viewer_key = random_token(32)?;
@@ -563,6 +561,23 @@ fn format_item_indices(indices: &[usize]) -> String {
 
 fn is_warning_only(kind: &str) -> bool {
     matches!(kind, "absolute_path" | "email" | "internal_url")
+}
+
+fn require_allow_warnings(has_warnings: bool, allow_warnings: bool) -> Result<()> {
+    if has_warnings && !allow_warnings {
+        bail!("publish with privacy warnings requires --allow-warnings");
+    }
+    Ok(())
+}
+
+fn resolve_endpoint(config: &SivtrConfig) -> Result<String> {
+    let endpoint = config.publish.endpoint.trim().trim_end_matches('/');
+    if endpoint.is_empty() {
+        bail!(
+            "[publish].endpoint is not set; add the publication service URL to config.toml (for example https://share.hnnulwh.cn)"
+        );
+    }
+    Ok(endpoint.to_string())
 }
 
 fn random_token(length: usize) -> Result<String> {
@@ -952,6 +967,7 @@ mod tests {
     #[test]
     fn empty_endpoint_is_rejected() {
         let mut config = SivtrConfig::default();
+        config.publish.endpoint.clear();
         assert!(resolve_endpoint(&config).is_err());
         config.publish.endpoint = "https://share.hnnulwh.cn/".into();
         assert_eq!(

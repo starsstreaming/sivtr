@@ -266,7 +266,11 @@ fn create_record_publication_draft(
         "publication anchors and records must have the same length"
     );
 
-    let first = &records[0];
+    // Search defaults to newest-first; publish snapshots are chronological.
+    let mut order: Vec<usize> = (0..records.len()).collect();
+    order.sort_by_key(|&i| records[i].work_ref.index());
+
+    let first = &records[order[0]];
     ensure!(
         first.kind == WorkRecordKind::ChatTurn,
         "publish v1 only supports agent conversations, not terminal records"
@@ -291,9 +295,10 @@ fn create_record_publication_draft(
         std::collections::BTreeMap::new();
     let mut previous_index = None;
 
-    for (record_position, record) in records.iter().enumerate() {
+    for &idx in &order {
+        let record = &records[idx];
         ensure!(
-            record.work_ref.whole() == expected[record_position],
+            record.work_ref.whole() == expected[idx],
             "publication anchors must match records in order"
         );
         ensure!(
