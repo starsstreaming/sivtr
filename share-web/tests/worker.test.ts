@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import worker, { expiryMs, isExpired, parseId, validEnvelope } from "../src/worker";
+import worker, { expiryMs, isExpired, parseId, readCappedBody, validEnvelope } from "../src/worker";
 
 describe("publication route primitives", () => {
   it("parses expiry-class ids without accepting arbitrary paths", () => {
@@ -60,5 +60,19 @@ describe("publication route primitives", () => {
     expect(remove.status).toBe(204);
     const after = await worker.fetch(new Request(`https://share.sivtr.dev/api/v1/publications/${id}`), env, {} as any);
     expect(after.status).toBe(404);
+  });
+
+  it("stops reading a PUT body once it exceeds 5 MiB", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const chunk = new Uint8Array(64 * 1024);
+        for (let sent = 0; sent <= 5 * 1024 * 1024; sent += chunk.byteLength) {
+          controller.enqueue(chunk);
+        }
+        controller.close();
+      },
+    });
+    const body = await readCappedBody(stream, 5 * 1024 * 1024);
+    expect(body).toBeNull();
   });
 });
