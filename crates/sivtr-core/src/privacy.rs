@@ -43,7 +43,7 @@ static WARNING_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(||
     vec![
         (
             "absolute_path",
-            Regex::new(r#"(?i)(?:[A-Z]:[\\/]|/(?:Users|home|tmp|var|etc)/|\\\\)[^\s`]+"#)
+            Regex::new(r#"(?i)(?:[A-Z]:[\\/]|/(?:Users|home|root|tmp|var|etc|opt|srv|usr|mnt|media|data|workspace)/|\\\\)[^\s`]+"#)
                 .unwrap(),
         ),
         ("email", Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").unwrap()),
@@ -146,5 +146,12 @@ mod tests {
         assert_eq!(text, r"C:\Users\alice\repo alice@example.com");
         assert!(report.warnings.iter().any(|item| item == "absolute_path"));
         assert!(report.warnings.iter().any(|item| item == "email"));
+        let (unix, unix_report) =
+            redact_text_with_report("/root/.ssh/id_rsa /workspace/company/repo");
+        assert_eq!(unix, "/root/.ssh/id_rsa /workspace/company/repo");
+        assert!(unix_report
+            .warnings
+            .iter()
+            .any(|item| item == "absolute_path"));
     }
 }

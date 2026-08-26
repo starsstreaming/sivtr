@@ -51,11 +51,15 @@ pub(super) fn workspace_picked_content_for_copy_with_line_filter(
         && matches!(shortcut, WorkspaceCopyShortcut::Displayed))
     .then_some(target)
     .flatten();
-    let anchors = picked_indices
-        .iter()
-        .filter_map(|idx| dialogues.get(*idx))
-        .flat_map(|dialogue| copy_shortcut_anchors(dialogue, shortcut, display_target))
-        .collect();
+    let anchors = if line_filter.is_some() {
+        Vec::new()
+    } else {
+        picked_indices
+            .iter()
+            .filter_map(|idx| dialogues.get(*idx))
+            .flat_map(|dialogue| copy_shortcut_anchors(dialogue, shortcut, display_target))
+            .collect()
+    };
     let units = picked_indices
         .into_iter()
         .filter_map(|idx| dialogues.get(idx))
